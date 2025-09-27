@@ -79,8 +79,8 @@
 #          f.rename(imgs_path / f.name)  # move image
 #          convert_label(path, lb_path, year, id)  # convert labels to YOLO format
 # train and val data as 1) directory: path/images/, 2) file: path/images.txt, or 3) list: [path1/images/, path2/images/]
-train:  G:/wan/data/RGBT/M3FD_Detection/M3FD_train.txt  # 16551 images
-val:  G:/wan/data/RGBT/M3FD_Detection/M3FD_trainval.txt # 4952 images
+train:  /home/teai/gwf_file/YOLOv11-RGBT/datasets/images/visible/train  # 16551 images
+val:  /home/teai/gwf_file/YOLOv11-RGBT/datasets/images/visible/val # 4952 images
 
 # number of classes
 nc: 6

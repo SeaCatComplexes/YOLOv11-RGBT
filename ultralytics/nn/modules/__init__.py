@@ -99,6 +99,11 @@ from .transformer import (
     TransformerLayer,
 )
 
+# Fusion modules (Adaptive Local-Global Fusion)
+from .fusion_modules.algf import PCFusionNet
+from .fusion_modules.local import LLModule
+from .fusion_modules.swin_global_module import SwinGGMoudle
+
 __all__ = (
     "Conv",
     "Conv2",
@@ -181,4 +186,5 @@ __all__ = (
     'MANet', 'HyperComputeModule', 'MANet_FasterBlock', 'MANet_FasterCGLU', 'MANet_Star',
 
     "GPT","Add2","Add","CrossTransformerFusion", 'TransformerFusionBlock','NiNfusion',
+    "PCFusionNet","LLModule","SwinGGMoudle",
 )

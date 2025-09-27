@@ -107,6 +107,7 @@ from ultralytics.nn.modules.ppyolo import (
 from ultralytics.nn.modules.yolov13_block import (
     DSConv, DSC3k2, DownsampleConv, FullPAD_Tunnel, HyperACE
 )
+from ultralytics.nn.modules import PCFusionNet
 
 # 代码格式参考 B站 魔鬼面具
 DETECT_CLASS = (Detect,  Detect_LSCD, DetectAux, DetectDeepDBB, DetectWDBB,DetectV8)
@@ -1105,6 +1106,22 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+        elif m is PCFusionNet:
+            # Dual-input fusion module at P3 (or any stage): ensure two inputs share same channels
+            assert isinstance(f, (list, tuple)) and len(f) == 2, "PCFusionNet expects two sources, e.g., [[i,j], 1, PCFusionNet, ...]"
+            c1_a, c1_b = ch[f[0]], ch[f[1]]
+            assert c1_a == c1_b, "Input channels to PCFusionNet must be the same."
+            c2 = c1_a  # output channels equal to input channels
+            # Args convention: prefer YAML without in_channels, i.e., [embed_dim, num_heads, depth, img_size]
+            # If YAML included in_channels as first value, keep it but validate it matches c1_a.
+            if len(args) == 5:
+                # [in_channels, embed_dim, num_heads, depth, img_size]
+                assert args[0] == c1_a, "PCFusionNet args[0] (in_channels) must match input channels"
+            elif len(args) == 4:
+                # [embed_dim, num_heads, depth, img_size] -> inject in_channels
+                args = [c1_a, *args]
+            else:
+                raise ValueError("PCFusionNet expects 4 or 5 args: [embed_dim, num_heads, depth, img_size] or [in_channels, embed_dim, num_heads, depth, img_size]")
         elif m is ADD:
             c2 = max(ch[x] for x in f)
         elif m is CrossAttentionShared:
