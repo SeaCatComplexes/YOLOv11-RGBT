@@ -165,16 +165,18 @@ class SwinGGMoudle(nn.Module):
     输入：双模态图像（如 PET + CT）
     输出：融合后的全局增强特征图
     """
-    def __init__(self, in_channels, embed_dim, num_heads, depth, img_size=256):
+    def __init__(self, in_channels, embed_dim, num_heads, depth, img_size=256, window_size=8, downsample_factor=2):
         super().__init__()
         self.in_channels = in_channels
         self.embed_dim = embed_dim
         self.img_size = img_size
+        self.window_size = window_size
+        self.downsample_factor = max(1, int(downsample_factor))
 
         # 1x1 卷积投影到嵌入空间
         self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=1)
 
-        # 2D 可学习位置编码
+    # 2D 可学习位置编码
         self.pos_embed = nn.Parameter(torch.zeros(1, embed_dim, img_size, img_size))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
@@ -195,6 +197,26 @@ class SwinGGMoudle(nn.Module):
 
         # 最终投影回原始通道数
         self.final_proj = nn.Conv2d(embed_dim, in_channels, kernel_size=1)
+
+    @staticmethod
+    def _pad_to_multiple(x, multiple):
+        B, C, H, W = x.shape
+        pad_h = (multiple - H % multiple) % multiple
+        pad_w = (multiple - W % multiple) % multiple
+        if pad_h == 0 and pad_w == 0:
+            return x, (0, 0)
+        # F.pad: (left, right, top, bottom)
+        x = F.pad(x, (0, pad_w, 0, pad_h))
+        return x, (pad_h, pad_w)
+
+    @staticmethod
+    def _unpad(x, pads):
+        pad_h, pad_w = pads
+        if pad_h:
+            x = x[:, :, : x.shape[2] - pad_h, :]
+        if pad_w:
+            x = x[:, :, :, : x.shape[3] - pad_w]
+        return x
 
     def forward(self, x1, x2):
         """
@@ -224,18 +246,58 @@ class SwinGGMoudle(nn.Module):
             x1 = blk(x1)
             x2 = blk(x2)
 
-        # 展平为序列，准备做 Cross Attention
+        # 窗口化的跨模态注意（可选下采样 + pad/unpad + window_partition/reverse）
         B, C, H, W = x1.shape
-        x1_flat = x1.view(B, C, H * W).permute(0, 2, 1)  # [B, N, C]
-        x2_flat = x2.view(B, C, H * W).permute(0, 2, 1)
+        H0, W0 = H, W
 
-        # Cross Attention: 双向交互
-        x1_enhanced = self.cross_attn(x1_flat, x2_flat)  # PET 查询 CT
-        x2_enhanced = self.cross_attn(x2_flat, x1_flat)  # CT 查询 PET
+        # 注意力前 2x 下采样（可选，AvgPool）
+        if self.downsample_factor > 1:
+            x1_d = F.avg_pool2d(x1, kernel_size=self.downsample_factor, stride=self.downsample_factor)
+            x2_d = F.avg_pool2d(x2, kernel_size=self.downsample_factor, stride=self.downsample_factor)
+        else:
+            x1_d, x2_d = x1, x2
 
-        # 转回 2D 特征图
-        x1_enhanced = x1_enhanced.permute(0, 2, 1).view(B, C, H, W)
-        x2_enhanced = x2_enhanced.permute(0, 2, 1).view(B, C, H, W)
+        # pad 到 window_size 的倍数
+        win = self.window_size
+        x1_p, pads = self._pad_to_multiple(x1_d, win)
+        x2_p, _ = self._pad_to_multiple(x2_d, win)
+        Hp, Wp = x1_p.shape[2], x1_p.shape[3]
+
+        # [B,C,H,W] -> [B,H,W,C]
+        A = x1_p.permute(0, 2, 3, 1).contiguous()
+        Bm = x2_p.permute(0, 2, 3, 1).contiguous()
+
+        # 划分窗口 -> [B*nW, win, win, C]
+        wA = window_partition(A, win)
+        wB = window_partition(Bm, win)
+        # 展平 -> [B*nW, win^2, C]
+        NA = wA.view(-1, win * win, C)
+        NB = wB.view(-1, win * win, C)
+
+        # 双向跨模态注意（窗口粒度）
+        NA2 = self.cross_attn(NA, NB)
+        NB2 = self.cross_attn(NB, NA)
+
+        # 还原窗口 -> [B*nW, win, win, C]
+        wA2 = NA2.view(-1, win, win, C)
+        wB2 = NB2.view(-1, win, win, C)
+
+        # 还原特征图 -> [B,Hp,Wp,C]
+        A2 = window_reverse(wA2, win, Hp, Wp)
+        B2 = window_reverse(wB2, win, Hp, Wp)
+
+        # 回到 [B,C,Hp,Wp]
+        x1_enhanced = A2.permute(0, 3, 1, 2).contiguous()
+        x2_enhanced = B2.permute(0, 3, 1, 2).contiguous()
+
+        # 去 pad
+        x1_enhanced = self._unpad(x1_enhanced, pads)
+        x2_enhanced = self._unpad(x2_enhanced, pads)
+
+        # 上采样回 P3 分辨率
+        if self.downsample_factor > 1:
+            x1_enhanced = F.interpolate(x1_enhanced, size=(H0, W0), mode='bilinear', align_corners=False)
+            x2_enhanced = F.interpolate(x2_enhanced, size=(H0, W0), mode='bilinear', align_corners=False)
 
         # 拼接 + 融合
         fused = torch.cat([x1_enhanced, x2_enhanced], dim=1)  # [B, 2C, H, W]
